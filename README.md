@@ -1,43 +1,66 @@
-# iOS Unity Build & TestFlight Upload Workflow
+<p align="center">
+  <img width="128" height="128" alt="ChatGPT Image Apr 15, 2026 at 04_16_02 PM" src="https://github.com/user-attachments/assets/7878f595-967d-4452-a8c4-c08d062efe3e" />
+</p>
 
-Этот репозиторий содержит GitHub Actions workflow для сборки Unity-проекта и загрузки iOS-билда в TestFlight.
+1. Форкните/скопируйте себе репозиторий
+2. секреты <img width="819" height="555" alt="image" src="https://github.com/user-attachments/assets/e5fdfb49-b7be-4301-b1be-bfbae54ee3ec" />
+3. переменные среды <img width="841" height="561" alt="image" src="https://github.com/user-attachments/assets/6e062b6f-dfd2-49bb-9ea0-b570e024e0a2" />
+4. для задников на загрузке заменить png в EasyLaunch-Patch
+5. Для фаербейса заменить файл в корне репозитория
+6. Для пушей создавать профайл заканчивающийся на .NotificationService
 
-## Необходимые переменные среды
 
-Для успешного запуска workflow необходимо определить следующие переменные среды (Secrets/Variables) в настройках репозитория:
+## Общее описание
 
-### Secrets
+Патч перехватывает стандартный запуск Unity-приложения и вставляет между `application:didFinishLaunching` и инициализацией движка промежуточный экран загрузки. По результату сервера принимается решение: показать Unity или полноэкранный WKWebView.
 
-- `UNITY_LICENSE` — Лицензия Unity.
-- `UNITY_EMAIL` — Email пользователя Unity.
-- `UNITY_PASSWORD` — Пароль пользователя Unity.
-- `APPSTORE_KEY_ID` — App Store Connect API Key ID.
-- `APPSTORE_ISSUER_ID` — App Store Connect Issuer ID.
-- `APPSTORE_P8` — Содержимое приватного ключа App Store Connect (.p8).
-- `MATCH_PASSWORD` — Пароль для match (Fastlane), может быть любым.
-- `GH_PAT` — GitHub Personal Access Token (для доступа к приватному репозиторию сертификатов).
+**Компоненты:**
 
-### Variables
+| Файл                                                                                                                                                                       | Роль                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [CustomAppController](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html)              | Подкласс[UnityAppController](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html), перехватывает `initUnityWithScene:` |
+| [PreloadViewController](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html)            | Экран загрузки, запускает 4-шаговую цепочку проверок                                                                                                                                     |
+| [PLServicesWrapper](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html)                | ObjC-мост к Firebase и AppsFlyer (чистый `.m` без C++)                                                                                                                                                              |
+| [WebViewController](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html)                | Полноэкранный WKWebView с fallback через NSURLSession                                                                                                                                                             |
+| [NotificationPromptViewController](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html) | Кастомный pre-permission экран уведомлений                                                                                                                                                                  |
+| [NotificationService.swift](vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html)        | Notification Service Extension для rich-push                                                                                                                                                                                      |
 
-- `UNITY_VERSION` — Версия Unity (например, 2022.3.62f3).
-- `XCODE_VERSION` — Версия Xcode (например, 26.2).
-- `BUNDLE_IDENTIFIER` — Bundle Identifier приложения.
-- `APPLE_TEAM_ID` — Apple Team ID.
-- `MATCH_GIT_URL` — URL репозитория для хранения сертификатов (дожен быть пустым).
-- `APPLE_ID_DIGITS` — Apple ID (только цифры).
-- `LAST_UPLOADED_BUILD_NUMBER` — Последний загруженный номер билда.
-- `MAJOR_VERSION` — Основная версия приложения.
+## Порядок вызовов при запуске
 
-## Как использовать
+```
+application:didFinishLaunchingWithOptions:            ← CustomAppController
+  ├─ извлекает pushURL из launchOptions (cold-start push)
+  ├─ [super ...] → Unity начинает инициализацию
+  └─ UNUserNotificationCenter.delegate = self  
+↓ Unity вызывает
+initUnityWithScene:           ← CustomAppController
+  └─ showPreloadScreenForScene:
+       └─ создаёт UIWindow(windowLevel = Normal+10)
+          └─ PreloadViewController (rootViewController)
+               └─ viewDidAppear → startChecks
+startChecks
+  ├─ [быстрый путь] pendingPushURL → onOpenURL(pushURL)
+  ├─ [быстрый путь] PLLaunchMode=="unity" → 0.5s → onComplete
+  └─ [полная цепочка]
+       ↓
+       pl_step1_checkNetwork  (HEAD endpointURL, таймаут 5с)
+         ├─ fallback → HEAD apple.com
+         └─ OK → pl_step2_initFirebase   
 
-1. Определите все необходимые secrets и variables в настройках репозитория.
-2. Запустите workflow вручную через вкладку Actions, выбрав нужный тип сборки (`full` или `short`).
+	pl_step2_initFirebase  (PLServicesWrapper configureFirebase:)
+         ├─ регистрирует FCM-token observer (PL_sendFirebaseFields)
+         └─ OK → pl_step3_initAppsFlyer
 
-## Описание workflow
+       pl_step3_initAppsFlyer  (GCD wait, таймаут 15с)
+         └─ OK → pl_step4_requestEndpoint:
 
-Workflow состоит из двух основных job:
+       pl_step4_requestEndpoint:  (POST endpointURL/config.php)
+         └─ pl_finishWithURL:
 
-- **buildForAllSupportedPlatforms** — сборка проекта Unity для iOS.
-- **xcodeBuildAndUpload** — сборка Xcode и загрузка в TestFlight через Fastlane.
-
-Подробнее см. в файле `.github/workflows/unity_ios.yml`.
+    pl_finishWithURL:  (0.3с задержка, main queue)
+         ├─ есть URL → pl_checkAndAskNotifications → onOpenURL(url)
+         │     └─ WebViewController presentViewController fullscreen
+         └─ нет URL → onComplete()
+               └─ dismissPreloadAndStartUnity
+                    └─ [super initUnityWithScene:pendingScene]
+```
